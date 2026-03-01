@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PlaylistCurator UI</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        line-height: 1.45;
+      }
+
+      .container {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 1.5rem;
+      }
+
+      h1 {
+        margin: 0 0 0.5rem;
+      }
+
+      p {
+        margin-top: 0;
+      }
+
+      form {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 0.75rem;
+        margin: 1rem 0;
+        align-items: end;
+      }
+
+      label {
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+        font-size: 0.95rem;
+      }
+
+      input {
+        padding: 0.5rem 0.6rem;
+        border-radius: 0.4rem;
+        border: 1px solid #8a8a8a;
+        background: transparent;
+      }
+
+      button {
+        padding: 0.6rem 0.8rem;
+        border-radius: 0.4rem;
+        border: 1px solid #6d6d6d;
+        cursor: pointer;
+      }
+
+      .status {
+        margin: 0.8rem 0;
+        min-height: 1.3rem;
+      }
+
+      .status.error {
+        color: #cc2f2f;
+      }
+
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 0.75rem;
+        margin: 1rem 0;
+      }
+
+      .card {
+        border: 1px solid #777;
+        border-radius: 0.55rem;
+        padding: 0.8rem;
+      }
+
+      .result-group {
+        border: 1px solid #777;
+        border-radius: 0.55rem;
+        padding: 0.8rem;
+        margin-bottom: 0.9rem;
+      }
+
+      ul {
+        padding-left: 1.1rem;
+        margin: 0.5rem 0 0;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="container">
+      <h1>PlaylistCurator</h1>
+      <p>Find harmonically compatible tracks by Camelot key, BPM, and genre.</p>
+
+      <form id="recommendationForm">
+        <label>
+          Camelot Key
+          <input name="camelotKey" value="8A" required />
+        </label>
+
+        <label>
+          BPM
+          <input name="bpm" type="number" value="124" min="1" step="0.1" required />
+        </label>
+
+        <label>
+          Genre
+          <input name="genre" value="electronic" />
+        </label>
+
+        <label>
+          BPM Window
+          <input name="bpmWindow" type="number" value="3" min="0" step="0.1" />
+        </label>
+
+        <button type="submit" id="submitButton">Get Recommendations</button>
+      </form>
+
+      <div id="status" class="status"></div>
+      <section id="results"></section>
+    </main>
+
+    <script>
+      const form = document.getElementById("recommendationForm");
+      const statusEl = document.getElementById("status");
+      const resultsEl = document.getElementById("results");
+      const submitButton = document.getElementById("submitButton");
+
+      function setStatus(message, isError = false) {
+        statusEl.textContent = message;
+        statusEl.className = isError ? "status error" : "status";
+      }
+
+      function readFormValues() {
+        const formData = new FormData(form);
+        const camelotKey = String(formData.get("camelotKey") || "").trim();
+        const bpm = String(formData.get("bpm") || "").trim();
+        const genre = String(formData.get("genre") || "").trim();
+        const bpmWindow = String(formData.get("bpmWindow") || "").trim();
+
+        return { camelotKey, bpm, genre, bpmWindow };
+      }
+
+      function buildQuery(values) {
+        const params = new URLSearchParams();
+        params.set("camelotKey", values.camelotKey);
+        params.set("bpm", values.bpm);
+        if (values.genre) {
+          params.set("genre", values.genre);
+        }
+        if (values.bpmWindow) {
+          params.set("bpmWindow", values.bpmWindow);
+        }
+        return params.toString();
+      }
+
+      function escapeHtml(value) {
+        return value
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      function renderResults(data) {
+        const keyGroups = Object.entries(data.resultsByKey || {})
+          .map(([key, songs]) => {
+            if (!Array.isArray(songs) || songs.length === 0) {
+              return `
+                <article class="result-group">
+                  <h3>${escapeHtml(key)}</h3>
+                  <p>No matches for this key.</p>
+                </article>
+              `;
+            }
+
+            const items = songs
+              .map((song) => {
+                const title = song.title || "Untitled";
+                const artist = song.artist || "Unknown artist";
+                const bpm = song.bpm === null ? "N/A" : String(song.bpm);
+                const genres = Array.isArray(song.genres) && song.genres.length
+                  ? song.genres.join(", ")
+                  : "N/A";
+
+                return `<li><strong>${escapeHtml(title)}</strong> - ${escapeHtml(
+                  artist,
+                )} (BPM: ${escapeHtml(bpm)}, Genres: ${escapeHtml(genres)})</li>`;
+              })
+              .join("");
+
+            return `
+              <article class="result-group">
+                <h3>${escapeHtml(key)}</h3>
+                <ul>${items}</ul>
+              </article>
+            `;
+          })
+          .join("");
+
+        const request = data.request || {};
+        const compatibleKeys = Array.isArray(data.compatibleKeys)
+          ? data.compatibleKeys.join(", ")
+          : "";
+
+        resultsEl.innerHTML = `
+          <section class="stats">
+            <article class="card">
+              <h2>Request</h2>
+              <p>Key: ${escapeHtml(String(request.camelotKey || ""))}</p>
+              <p>BPM: ${escapeHtml(String(request.bpm || ""))}</p>
+              <p>Genre: ${escapeHtml(String(request.genre || ""))}</p>
+              <p>Window: ${escapeHtml(String(request.bpmWindow || ""))}</p>
+            </article>
+            <article class="card">
+              <h2>Stats</h2>
+              <p>Compatible Keys: ${escapeHtml(compatibleKeys)}</p>
+              <p>Unique Candidates: ${escapeHtml(String(data.totalUniqueCandidates || 0))}</p>
+              <p>Total Matched: ${escapeHtml(String(data.totalMatched || 0))}</p>
+            </article>
+          </section>
+          <section>
+            ${keyGroups}
+          </section>
+        `;
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        resultsEl.innerHTML = "";
+        setStatus("Loading recommendations...");
+        submitButton.disabled = true;
+
+        try {
+          const values = readFormValues();
+          const queryString = buildQuery(values);
+          const response = await fetch(`/recommendations?${queryString}`);
+
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            const message = payload.message || "Request failed.";
+            const details = payload.details ? ` Details: ${payload.details}` : "";
+            throw new Error(`${message}${details}`);
+          }
+
+          setStatus("Recommendations loaded.");
+          renderResults(payload);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unexpected error";
+          setStatus(message, true);
+        } finally {
+          submitButton.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>
