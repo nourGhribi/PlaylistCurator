@@ -111,7 +111,7 @@
 
         <label>
           Genre
-          <input name="genre" value="electronic" />
+          <input name="genre" value="electronic" placeholder="electronic, house, techno" />
         </label>
 
         <label>
@@ -216,7 +216,11 @@
               <h2>Request</h2>
               <p>Key: ${escapeHtml(String(request.camelotKey || ""))}</p>
               <p>BPM: ${escapeHtml(String(request.bpm || ""))}</p>
-              <p>Genre: ${escapeHtml(String(request.genre || ""))}</p>
+              <p>Genres: ${escapeHtml(
+                Array.isArray(request.genres)
+                  ? request.genres.join(", ")
+                  : String(request.genre || ""),
+              )}</p>
               <p>Window: ${escapeHtml(String(request.bpmWindow || ""))}</p>
             </article>
             <article class="card">
@@ -224,6 +228,7 @@
               <p>Compatible Keys: ${escapeHtml(compatibleKeys)}</p>
               <p>Unique Candidates: ${escapeHtml(String(data.totalUniqueCandidates || 0))}</p>
               <p>Total Matched: ${escapeHtml(String(data.totalMatched || 0))}</p>
+              <p>Skipped (Upstream): ${escapeHtml(String(data.skippedSongs || 0))}</p>
             </article>
           </section>
           <section>

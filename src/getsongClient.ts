@@ -7,6 +7,10 @@ export interface SongByKeyResult {
 }
 
 export type SongDetail = Record<string, unknown>;
+export interface SongDetailFetchResult {
+  detail: SongDetail | null;
+  skippedDueToUpstream: boolean;
+}
 
 function toUrl(pathname: string, query: Record<string, string | number>): URL {
   const url = new URL(pathname, env.getSongBaseUrl);
@@ -22,6 +26,21 @@ function toLoggableUrl(url: URL): string {
     safeUrl.searchParams.set("api_key", "***");
   }
   return safeUrl.toString();
+}
+
+function truncateForLog(value: string, maxLength = 1200): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return `${value.slice(0, maxLength)}... [truncated ${value.length - maxLength} chars]`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function shouldRetryStatus(statusCode: number): boolean {
+  return statusCode === 429 || statusCode === 502 || statusCode === 503 || statusCode === 504;
 }
 
 export class UpstreamApiError extends Error {
@@ -41,7 +60,7 @@ function extractArrayPayload(payload: unknown): unknown[] {
     return [];
   }
 
-  const candidateFields = ["results", "songs", "data", "response"];
+  const candidateFields = ["results", "songs", "data", "response", "key_of"];
   for (const field of candidateFields) {
     const value = (payload as Record<string, unknown>)[field];
     if (Array.isArray(value)) {
@@ -70,24 +89,59 @@ export class GetSongClient {
   private readonly songCache = new Map<string, SongDetail | null>();
 
   private async fetchJson(pathname: string, query: Record<string, string | number>): Promise<unknown> {
+    const maxAttempts = 3;
+    const baseBackoffMs = 250;
+
     // Send api_key in query because some GetSong endpoints enforce it there.
     const url = toUrl(pathname, { ...query, api_key: env.getSongApiKey });
-    console.log(`[GetSong] GET ${toLoggableUrl(url)}`);
-    const response = await fetch(url, {
-      method: "GET",
-      headers: {
-        "X-API-KEY": env.getSongApiKey,
-      },
-    });
+    // console.log(`[GetSong] GET ${toLoggableUrl(url)}`);
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: "GET",
+          headers: {
+            "X-API-KEY": env.getSongApiKey,
+          },
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unknown fetch error";
+        if (attempt < maxAttempts) {
+          await sleep(baseBackoffMs * 2 ** (attempt - 1));
+          continue;
+        }
+        throw new UpstreamApiError(`GetSong network error for ${pathname}: ${message}`, 502);
+      }
 
-    if (!response.ok) {
+      const responseText = await response.text();
+      // console.log(
+      //   `[GetSong] RESPONSE ${response.status} ${response.statusText} ${toLoggableUrl(url)} :: ${truncateForLog(responseText)}`,
+      // );
+
+      if (response.ok) {
+        try {
+          return JSON.parse(responseText);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Invalid JSON";
+          throw new UpstreamApiError(
+            `GetSong returned invalid JSON for ${pathname}: ${message}`,
+            response.status,
+          );
+        }
+      }
+
+      if (attempt < maxAttempts && shouldRetryStatus(response.status)) {
+        await sleep(baseBackoffMs * 2 ** (attempt - 1));
+        continue;
+      }
+
       throw new UpstreamApiError(
-        `GetSong request failed for ${pathname}: HTTP ${response.status}`,
+        `GetSong request failed for ${pathname}: HTTP ${response.status}. Body: ${truncateForLog(responseText, 300)}`,
         response.status,
       );
     }
 
-    return response.json();
+    throw new UpstreamApiError(`GetSong request failed for ${pathname}: retries exhausted`, 502);
   }
 
   async fetchSongsByKey(params: GetSongKeyParams, limit = 200): Promise<SongByKeyResult[]> {
@@ -109,12 +163,22 @@ export class GetSongClient {
       .filter((row): row is SongByKeyResult => Boolean(row));
   }
 
-  async fetchSongById(id: string): Promise<SongDetail | null> {
+  async fetchSongById(id: string): Promise<SongDetailFetchResult> {
     if (this.songCache.has(id)) {
-      return this.songCache.get(id) ?? null;
+      return { detail: this.songCache.get(id) ?? null, skippedDueToUpstream: false };
     }
 
-    const payload = await this.fetchJson("/song/", { id });
+    let payload: unknown;
+    try {
+      payload = await this.fetchJson("/song/", { id });
+    } catch (error) {
+      if (error instanceof UpstreamApiError && error.statusCode >= 500) {
+        console.warn(`[GetSong] Skipping song ${id} due to upstream ${error.statusCode}`);
+        this.songCache.set(id, null);
+        return { detail: null, skippedDueToUpstream: true };
+      }
+      throw error;
+    }
     let detail: SongDetail | null = null;
 
     if (Array.isArray(payload)) {
@@ -132,6 +196,6 @@ export class GetSongClient {
     }
 
     this.songCache.set(id, detail);
-    return detail;
+    return { detail, skippedDueToUpstream: false };
   }
 }

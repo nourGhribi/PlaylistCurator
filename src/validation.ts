@@ -4,6 +4,7 @@ export interface RecommendationInput {
   camelotKey: string;
   bpm: number;
   genre: string;
+  genres: string[];
   bpmWindow: number;
 }
 
@@ -45,10 +46,22 @@ export function parseRecommendationInput(query: Record<string, unknown>): Recomm
   }
 
   const rawGenre = toSingleQueryValue(query.genre);
-  const genre = (rawGenre ?? "electronic").trim();
-  if (!genre) {
+  const genreInput = (rawGenre ?? "electronic").trim();
+  if (!genreInput) {
     throw new ValidationError("Invalid genre. If provided, it must be a non-empty string");
   }
+  const genres = Array.from(
+    new Set(
+      genreInput
+        .split(",")
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0),
+    ),
+  );
+  if (genres.length === 0) {
+    throw new ValidationError("Invalid genre. Provide at least one non-empty genre");
+  }
+  const genre = genres.join(", ");
 
   const rawBpmWindow = toSingleQueryValue(query.bpmWindow);
   const bpmWindow = rawBpmWindow === undefined ? 3 : Number(rawBpmWindow);
@@ -56,5 +69,5 @@ export function parseRecommendationInput(query: Record<string, unknown>): Recomm
     throw new ValidationError("Invalid bpmWindow. Expected a non-negative number");
   }
 
-  return { camelotKey, bpm, genre, bpmWindow };
+  return { camelotKey, bpm, genre, genres, bpmWindow };
 }

@@ -1,5 +1,5 @@
 import { getCompatibleCamelotKeys, getGetSongParamsForCamelot } from "./camelot";
-import { GetSongClient, SongDetail } from "./getsongClient";
+import { GetSongClient, SongDetail, UpstreamApiError } from "./getsongClient";
 import { RecommendationInput } from "./validation";
 
 export interface RecommendedSong {
@@ -16,6 +16,7 @@ export interface RecommendationResponse {
   compatibleKeys: string[];
   totalUniqueCandidates: number;
   totalMatched: number;
+  skippedSongs: number;
   resultsByKey: Record<string, RecommendedSong[]>;
 }
 
@@ -166,10 +167,13 @@ function extractArtist(song: SongDetail): string | null {
   return readString(songObj.artist_name);
 }
 
-function songMatchesGenre(song: SongDetail, requestedGenre: string): { matches: boolean; genres: string[] } {
+function songMatchesGenre(song: SongDetail, requestedGenres: string[]): { matches: boolean; genres: string[] } {
   const genres = collectGenres(song);
-  const wanted = requestedGenre.toLowerCase();
-  const matches = genres.some((genre) => genre.toLowerCase().includes(wanted));
+  const wanted = requestedGenres.map((genre) => genre.toLowerCase());
+  const matches = genres.some((genre) => {
+    const normalizedGenre = genre.toLowerCase();
+    return wanted.some((targetGenre) => normalizedGenre.includes(targetGenre));
+  });
   return { matches, genres };
 }
 
@@ -195,22 +199,46 @@ export async function buildRecommendations(
 
   await Promise.all(
     compatibleKeys.map(async (compatibleKey) => {
-      const params = getGetSongParamsForCamelot(compatibleKey);
-      const songs = await client.fetchSongsByKey(params, 200);
-      const idSet = new Set<string>();
-      for (const song of songs) {
-        idSet.add(song.id);
-        allSongIds.add(song.id);
+      try {
+        const params = getGetSongParamsForCamelot(compatibleKey);
+        const songs = await client.fetchSongsByKey(params, 200);
+        const idSet = new Set<string>();
+        for (const song of songs) {
+          idSet.add(song.id);
+          allSongIds.add(song.id);
+        }
+        idsByKey.set(compatibleKey, idSet);
+      } catch (error) {
+        // Keep returning partial recommendations when an upstream key bucket is temporarily unavailable.
+        idsByKey.set(compatibleKey, new Set<string>());
+        if (error instanceof UpstreamApiError && error.statusCode >= 500) {
+          return;
+        }
+        throw error;
       }
-      idsByKey.set(compatibleKey, idSet);
     }),
   );
 
   const detailsById = new Map<string, SongDetail | null>();
+  let skippedSongs = 0;
+  const songIds = Array.from(allSongIds);
+  const maxConcurrentSongRequests = 12;
+  let currentIndex = 0;
+
   await Promise.all(
-    Array.from(allSongIds).map(async (id) => {
-      const detail = await client.fetchSongById(id);
-      detailsById.set(id, detail);
+    Array.from({ length: Math.min(maxConcurrentSongRequests, songIds.length) }).map(async () => {
+      while (currentIndex < songIds.length) {
+        const songId = songIds[currentIndex];
+        currentIndex += 1;
+        if (!songId) {
+          continue;
+        }
+        const result = await client.fetchSongById(songId);
+        detailsById.set(songId, result.detail);
+        if (result.skippedDueToUpstream) {
+          skippedSongs += 1;
+        }
+      }
     }),
   );
 
@@ -233,7 +261,7 @@ export async function buildRecommendations(
         continue;
       }
 
-      const genreCheck = songMatchesGenre(detail, input.genre);
+      const genreCheck = songMatchesGenre(detail, input.genres);
       if (!genreCheck.matches) {
         continue;
       }
@@ -249,6 +277,7 @@ export async function buildRecommendations(
     compatibleKeys,
     totalUniqueCandidates: allSongIds.size,
     totalMatched,
+    skippedSongs,
     resultsByKey,
   };
 }
